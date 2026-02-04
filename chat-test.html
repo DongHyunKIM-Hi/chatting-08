@@ -257,6 +257,25 @@
     border-top: 1px solid var(--border);
     background: var(--surface);
   }
+  .typing-indicator {
+    font-size: 13px;
+    color: var(--green);
+    padding: 0 0 8px 4px;
+    min-height: 24px;
+    font-style: italic;
+  }
+  .typing-indicator .dots {
+    display: inline-block;
+  }
+  .typing-indicator .dots::after {
+    content: '...';
+    animation: dots 1.4s steps(4, end) infinite;
+  }
+  @keyframes dots {
+    0%, 20% { content: '.'; }
+    40% { content: '..'; }
+    60%, 100% { content: '...'; }
+  }
   .chat-input-form {
     display: flex;
     gap: 12px;
@@ -367,8 +386,9 @@
     </div>
 
     <div class="chat-input-wrapper">
+      <div class="typing-indicator" id="typingIndicator"></div>
       <form class="chat-input-form" id="chatForm" onsubmit="sendMessage(event)">
-        <input type="text" id="messageInput" placeholder="메시지를 입력하세요..." disabled/>
+        <input type="text" id="messageInput" placeholder="메시지를 입력하세요..." disabled oninput="handleTyping()"/>
         <button type="submit" disabled>전송</button>
       </form>
     </div>
@@ -376,8 +396,8 @@
 </div>
 
 <script>
-const API_BASE = 'http://localhost:8080';
-const WS_URL = 'http://localhost:8080/ws';
+const API_BASE = 'http://localhost:8081';
+const WS_URL = 'http://localhost:8081/ws';
 
 let stompClient = null;
 let currentUserId = null;
@@ -386,6 +406,9 @@ let currentRoomId = null;
 let jwtToken = null;
 let rooms = [];
 let currentSubscription = null; // ← 구독 ID 저장용 추가
+let typingSubscription = null; // ← 타이핑 구독 ID
+let typingTimeout = null; // ← 타이핑 타이머
+let typingUsers = new Set(); // ← 현재 입력 중인 사용자들
 
 // ─────────────────────────────────────────────────────────
 // 초기화
@@ -549,8 +572,14 @@ async function selectRoom(roomId, roomName) {
     currentSubscription.unsubscribe();
     currentSubscription = null;
   }
+  if (typingSubscription) {
+    typingSubscription.unsubscribe();
+    typingSubscription = null;
+  }
   
   currentRoomId = roomId;
+  typingUsers.clear();
+  updateTypingIndicator();
   
   // UI 업데이트
   document.getElementById('chatTitle').textContent = roomName;
@@ -566,12 +595,77 @@ async function selectRoom(roomId, roomName) {
   
   // 새 채팅방 구독
   if (stompClient && stompClient.connected) {
+    // 메시지 구독
     currentSubscription = stompClient.subscribe(`/sub/chat/${roomId}`, function(message) {
       console.log('📨 메시지 수신:', message.body);
       const data = JSON.parse(message.body);
       displayMessage(data);
     });
+    
+    // 타이핑 인디케이터 구독
+    typingSubscription = stompClient.subscribe(`/sub/chat/${roomId}/typing`, function(message) {
+      const data = JSON.parse(message.body);
+      handleTypingIndicator(data);
+    });
+    
     console.log('✅ 채팅방', roomId, '구독 시작');
+  }
+}
+
+// ─────────────────────────────────────────────────────────
+// 타이핑 인디케이터
+// ─────────────────────────────────────────────────────────
+function handleTyping() {
+  if (!currentRoomId || !stompClient || !stompClient.connected) return;
+  
+  // 타이핑 중 신호 전송
+  sendTypingStatus(true);
+  
+  // 기존 타이머 취소
+  if (typingTimeout) {
+    clearTimeout(typingTimeout);
+  }
+  
+  // 2초 후 타이핑 중지 신호 전송
+  typingTimeout = setTimeout(() => {
+    sendTypingStatus(false);
+  }, 2000);
+}
+
+function sendTypingStatus(isTyping) {
+  if (!stompClient || !stompClient.connected || !currentRoomId) return;
+  
+  const typingData = {
+    roomId: currentRoomId,
+    typing: isTyping
+  };
+  
+  stompClient.send('/pub/chat.typing', {}, JSON.stringify(typingData));
+}
+
+function handleTypingIndicator(data) {
+  // 내가 보낸 타이핑 신호는 무시
+  if (data.userId === currentUserId) return;
+  
+  if (data.typing) {
+    typingUsers.add(data.userName);
+  } else {
+    typingUsers.delete(data.userName);
+  }
+  
+  updateTypingIndicator();
+}
+
+function updateTypingIndicator() {
+  const indicator = document.getElementById('typingIndicator');
+  
+  if (typingUsers.size === 0) {
+    indicator.innerHTML = '';
+  } else if (typingUsers.size === 1) {
+    const userName = Array.from(typingUsers)[0];
+    indicator.innerHTML = `${userName}이 입력 중<span class="dots"></span>`;
+  } else {
+    indicator.innerHTML = `${typingUsers.size}명이 입력 중<span class="dots"></span>`;
   }
 }
 
@@ -626,6 +720,13 @@ function sendMessage(event) {
   
   stompClient.send('/pub/chat.send', {}, JSON.stringify(message));
   input.value = '';
+  
+  // 타이핑 중지 신호 전송
+  sendTypingStatus(false);
+  if (typingTimeout) {
+    clearTimeout(typingTimeout);
+    typingTimeout = null;
+  }
   
   console.log('메시지 전송:', message);
 }
@@ -710,6 +811,10 @@ document.getElementById('userSelect').addEventListener('change', async function(
     currentSubscription.unsubscribe();
     currentSubscription = null;
   }
+  if (typingSubscription) {
+    typingSubscription.unsubscribe();
+    typingSubscription = null;
+  }
   
   // 기존 연결 끊기
   if (stompClient) {
@@ -719,6 +824,7 @@ document.getElementById('userSelect').addEventListener('change', async function(
   // 새 사용자로 재연결
   await selectUser(userId);
   currentRoomId = null;
+  typingUsers.clear();
   clearMessages();
   
   // 채팅방 목록 새로고침

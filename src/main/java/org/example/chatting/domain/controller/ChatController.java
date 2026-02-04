@@ -9,6 +9,7 @@ import org.example.chatting.common.entity.ChatRoom;
 import org.example.chatting.common.entity.User;
 import org.example.chatting.common.interceptor.AuthenticatedUser;
 import org.example.chatting.domain.model.ChatMessageDto;
+import org.example.chatting.domain.model.TypingIndicatorDto;
 import org.example.chatting.domain.repository.ChatMessageRepository;
 import org.example.chatting.domain.repository.ChatRoomRepository;
 import org.springframework.messaging.handler.annotation.MessageMapping;
@@ -22,6 +23,7 @@ public class ChatController {
     private final ChatMessageRepository chatMessageRepository;
     private final ChatRedisPublisher chatRedisPublisher;
     private final ChatRoomRepository chatRoomRepository;
+    private final SimpMessagingTemplate messagingTemplate;
 
     @MessageMapping("/chat.send")
     public void send(ChatMessageDto dto, Principal principal) {
@@ -44,5 +46,16 @@ public class ChatController {
 
         chatRedisPublisher.publish(room.getId(), redisMessage);
 
+    }
+
+    @MessageMapping("/chat.typing")
+    public void typing(TypingIndicatorDto dto, Principal principal) {
+        User user = AuthenticatedUser.fromPrincipal(principal);
+
+        dto.setUserId(user.getId());
+        dto.setUserName(user.getName());
+
+        // 타이핑 상태를 해당 채팅방의 다른 사용자들에게 브로드캐스트
+        messagingTemplate.convertAndSend("/sub/chat/" + dto.getRoomId() + "/typing", dto);
     }
 }
